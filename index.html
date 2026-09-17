@@ -278,6 +278,13 @@
     max-height:90vh; overflow-y:auto; padding:24px 28px;
   }
   #filterModal h2{margin:0 0 4px;}
+  #pushSheetModalBg{position:fixed; inset:0; background:rgba(5,6,10,.6); z-index:600; display:none; align-items:center; justify-content:center; padding:20px;}
+  #pushSheetModalBg.active{display:flex;}
+  #pushSheetModal{
+    background:var(--panel); border:3px solid var(--border); border-radius:22px; width:100%; max-width:640px;
+    max-height:90vh; overflow-y:auto; padding:24px 28px;
+  }
+  #pushSheetModal h2{margin:0 0 4px;}
   .filterCondRow{display:flex; gap:8px; align-items:center;}
   .filterCondRow select, .filterCondRow input{
     background:var(--panel2); border:2px solid var(--border); border-radius:8px; color:var(--ink);
@@ -459,6 +466,7 @@
     <button class="headerBtn" id="btnStorageInfo">Storage: …</button>
     <button class="headerBtn" id="btnCategories">Categories</button>
     <button class="headerBtn" id="btnExport">Export .sqlite</button>
+    <button class="headerBtn" id="btnPushToSheet">Export to Sheet</button>
     <button class="headerBtn" id="btnQuickJob">Quickjob</button>
     <button class="headerBtn" id="btnNewJob">+ New Job</button>
   </header>
@@ -658,6 +666,19 @@
       <button class="btnPrimary" id="btnApplyFilter">Apply</button>
       <button class="btnGhost" id="btnClearAdvancedFilter">Clear advanced filter</button>
       <button class="btnGhost" id="btnCloseFilterModal">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= EXPORT TO GOOGLE SHEET MODAL ================= -->
+<div id="pushSheetModalBg">
+  <div id="pushSheetModal">
+    <h2>Export to Google Sheet</h2>
+    <p class="footerNote">Pushes everything currently loaded in this app up to a Google Sheet, overwriting whatever is already in that sheet. Your local data here isn't touched unless you check "keep syncing" below.</p>
+    <div id="pushSheetPanel" class="gsPanel" style="margin-top:14px;"></div>
+    <div class="fieldError" id="pushSheetError"></div>
+    <div class="modalActions">
+      <button class="btnGhost" id="btnClosePushSheet">Close</button>
     </div>
   </div>
 </div>
@@ -1573,6 +1594,29 @@ async function connectToSheet(spreadsheetId, isNew) {
   enterApp();
 }
 
+// Pushes whatever is CURRENTLY loaded (in-app, already-entered data) up to a
+// Google Sheet — the inverse of connectToSheet(id, true), which always
+// starts a new sheet from a blank database. This is the one-time "export my
+// data to Sheets" action reachable from inside the running app (header
+// button), not just the Setup screen's initial storage-mode choice. It never
+// calls newDatabase(), so nothing already loaded here is lost. By default it
+// leaves the app's ongoing storage mode (browser/file) untouched — pass
+// {keepSyncing:true} to also make this sheet the ongoing autosave target,
+// same as connecting to an existing sheet from Setup.
+async function exportCurrentDataToSheet(spreadsheetId, opts) {
+  opts = opts || {};
+  gsSpreadsheetId = spreadsheetId;
+  await gsWriteAll();
+  if (opts.keepSyncing) {
+    storageMode = 'sheets';
+    await IDB.set('autosave-bytes', db.export());
+    await IDB.set('autosave-mode', 'sheets');
+    await IDB.set('sheets-spreadsheet-id', gsSpreadsheetId);
+    setStorageLabel();
+  }
+  return spreadsheetId;
+}
+
 /* ---------------------------------------------------------------------
    Setup flow
    --------------------------------------------------------------------- */
@@ -1793,6 +1837,133 @@ function wireGsheetPanelHandlers() {
     } catch (e) {
       console.error(e);
       showToast('Google Picker failed: ' + e.message);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------------
+   In-app "Export to Google Sheet" modal — reuses the Google sign-in/
+   Client-ID plumbing above, but calls exportCurrentDataToSheet() instead
+   of connectToSheet(), so opening this modal never wipes the app's
+   current data.
+   --------------------------------------------------------------------- */
+function renderPushSheetPanel() {
+  const panel = document.getElementById('pushSheetPanel');
+  const clientId = loadGoogleClientId();
+  const apiKey = loadGoogleApiKey();
+  let html = '';
+
+  html += `<div class="footerNote">Uses the same Google connection as the Setup screen's "Connect a Google Sheet" option.
+    One-time setup: in the
+    <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style="color:var(--accent)">Google Cloud Console</a>,
+    enable the Google Sheets API, then create an OAuth Client ID (Web application) with this page's address as an Authorized JavaScript origin.</div>
+    <div class="addPointerRow" style="margin-top:8px;">
+      <input type="text" id="psClientIdInput" placeholder="OAuth Client ID" value="${escapeHtml(clientId)}">
+      <button id="psSaveClientId">Save</button>
+    </div>
+    <div class="addPointerRow" style="margin-top:8px;">
+      <input type="text" id="psApiKeyInput" placeholder="API key (optional, enables Drive picker)" value="${escapeHtml(apiKey)}">
+      <button id="psSaveApiKey">Save</button>
+    </div>`;
+
+  if (clientId) {
+    if (!gsAccessToken) {
+      html += `<button class="headerBtn" id="psSignIn" style="margin-top:12px;">Sign in with Google</button>`;
+    } else {
+      html += `<div class="footerNote" style="margin-top:12px; color:var(--complete);">Signed in ✓</div>
+        <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:.85rem;">
+          <input type="checkbox" id="psKeepSyncing"> Keep syncing future changes to this sheet automatically
+        </label>
+        <div class="addPointerRow" style="margin-top:8px;">
+          <input type="text" id="psNewSheetName" placeholder="New sheet name" value="Task Planner">
+          <button id="psCreateSheetBtn">Create sheet &amp; push</button>
+        </div>
+        <div class="addPointerRow" style="margin-top:8px;">
+          <input type="text" id="psExistingSheetInput" placeholder="Paste a Google Sheet link or ID" value="${escapeHtml(gsSpreadsheetId || '')}">
+          <button id="psPushExistingBtn">Push to this sheet</button>
+        </div>`;
+      if (apiKey) {
+        html += `<div style="margin-top:8px;"><button class="headerBtn" id="psPickBtn">Pick from Drive…</button></div>`;
+      }
+    }
+  }
+
+  panel.innerHTML = html;
+  wirePushSheetPanelHandlers();
+}
+
+function wirePushSheetPanelHandlers() {
+  const byId = (id) => document.getElementById(id);
+  const showErr = (msg) => {
+    const err = byId('pushSheetError');
+    err.textContent = msg || '';
+    err.style.display = msg ? 'block' : 'none';
+  };
+  showErr('');
+
+  if (byId('psSaveClientId')) byId('psSaveClientId').addEventListener('click', () => {
+    saveGoogleClientId(byId('psClientIdInput').value.trim());
+    renderPushSheetPanel();
+  });
+  if (byId('psSaveApiKey')) byId('psSaveApiKey').addEventListener('click', () => {
+    saveGoogleApiKey(byId('psApiKeyInput').value.trim());
+    renderPushSheetPanel();
+  });
+  if (byId('psSignIn')) byId('psSignIn').addEventListener('click', async () => {
+    const clientId = loadGoogleClientId();
+    byId('psSignIn').textContent = 'Opening Google sign-in…';
+    try {
+      await googleSignIn(clientId);
+      renderPushSheetPanel();
+    } catch (e) {
+      console.error(e);
+      showErr('Google sign-in failed: ' + e.message);
+      byId('psSignIn').textContent = 'Sign in with Google';
+    }
+  });
+  if (byId('psCreateSheetBtn')) byId('psCreateSheetBtn').addEventListener('click', async () => {
+    const name = byId('psNewSheetName').value.trim() || 'Task Planner';
+    const keepSyncing = byId('psKeepSyncing').checked;
+    byId('psCreateSheetBtn').textContent = 'Creating…';
+    try {
+      const id = await gsCreateSpreadsheet(name);
+      await exportCurrentDataToSheet(id, { keepSyncing });
+      showToast('Pushed your current data to the new sheet ✓');
+      renderPushSheetPanel();
+    } catch (e) {
+      console.error(e);
+      showErr('Could not create/push the sheet: ' + e.message);
+      byId('psCreateSheetBtn').textContent = 'Create sheet & push';
+    }
+  });
+  if (byId('psPushExistingBtn')) byId('psPushExistingBtn').addEventListener('click', async () => {
+    const raw = byId('psExistingSheetInput').value.trim();
+    if (!raw) return;
+    const id = extractSheetId(raw);
+    const keepSyncing = byId('psKeepSyncing').checked;
+    byId('psPushExistingBtn').textContent = 'Pushing…';
+    try {
+      await exportCurrentDataToSheet(id, { keepSyncing });
+      showToast('Pushed your current data to the sheet ✓');
+      renderPushSheetPanel();
+    } catch (e) {
+      console.error(e);
+      showErr('Could not push to that sheet: ' + e.message);
+      byId('psPushExistingBtn').textContent = 'Push to this sheet';
+    }
+  });
+  if (byId('psPickBtn')) byId('psPickBtn').addEventListener('click', async () => {
+    try {
+      const id = await openGooglePicker(loadGoogleApiKey());
+      if (id) {
+        const keepSyncing = byId('psKeepSyncing').checked;
+        await exportCurrentDataToSheet(id, { keepSyncing });
+        showToast('Pushed your current data to the sheet ✓');
+        renderPushSheetPanel();
+      }
+    } catch (e) {
+      console.error(e);
+      showErr('Google Picker failed: ' + e.message);
     }
   });
 }
@@ -3886,6 +4057,17 @@ function wireAppUI() {
     if (storageMode === 'sheets' && gsSpreadsheetId) {
       window.open('https://docs.google.com/spreadsheets/d/' + gsSpreadsheetId + '/edit', '_blank');
     }
+  });
+
+  document.getElementById('btnPushToSheet').addEventListener('click', () => {
+    document.getElementById('pushSheetModalBg').classList.add('active');
+    renderPushSheetPanel();
+  });
+  document.getElementById('btnClosePushSheet').addEventListener('click', () => {
+    document.getElementById('pushSheetModalBg').classList.remove('active');
+  });
+  document.getElementById('pushSheetModalBg').addEventListener('click', (e) => {
+    if (e.target.id === 'pushSheetModalBg') document.getElementById('pushSheetModalBg').classList.remove('active');
   });
 }
 
