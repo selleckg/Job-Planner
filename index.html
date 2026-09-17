@@ -1440,7 +1440,7 @@ const GOOGLE_API_KEY_KEY = 'tp_google_api_key';
 const SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 const SHEETS_JOB_COLS = ['id','name','status','category','size','date_created','due_date',
   'date_last_status','description','notes','est_work','act_work','est_cost','act_cost','parent_id','seq',
-  'priority','urgency'];
+  'priority','urgency','work_lane'];
 
 let gsAccessToken = null;
 let gsSpreadsheetId = null;
@@ -1450,6 +1450,14 @@ function loadGoogleClientId() { return localStorage.getItem(GOOGLE_CLIENT_ID_KEY
 function saveGoogleClientId(id) { localStorage.setItem(GOOGLE_CLIENT_ID_KEY, id); }
 function loadGoogleApiKey() { return localStorage.getItem(GOOGLE_API_KEY_KEY) || ''; }
 function saveGoogleApiKey(k) { localStorage.setItem(GOOGLE_API_KEY_KEY, k); }
+
+// Remembers the last sheet used from the in-app "Export to Sheet" modal, so
+// re-opening it (even after a reload, and even if the app's ongoing storage
+// mode is still "browser"/"file" — i.e. "keep syncing" was never checked)
+// pre-fills the same sheet instead of making you paste the link every time.
+const LAST_EXPORT_SHEET_KEY = 'tp_last_export_sheet_id';
+function loadLastExportSheetId() { return localStorage.getItem(LAST_EXPORT_SHEET_KEY) || ''; }
+function saveLastExportSheetId(id) { localStorage.setItem(LAST_EXPORT_SHEET_KEY, id); }
 
 function loadScript(src, globalCheck) {
   return new Promise((resolve, reject) => {
@@ -1607,6 +1615,7 @@ async function exportCurrentDataToSheet(spreadsheetId, opts) {
   opts = opts || {};
   gsSpreadsheetId = spreadsheetId;
   await gsWriteAll();
+  saveLastExportSheetId(spreadsheetId);
   if (opts.keepSyncing) {
     storageMode = 'sheets';
     await IDB.set('autosave-bytes', db.export());
@@ -1614,6 +1623,21 @@ async function exportCurrentDataToSheet(spreadsheetId, opts) {
     await IDB.set('sheets-spreadsheet-id', gsSpreadsheetId);
     setStorageLabel();
   }
+  return spreadsheetId;
+}
+
+// The inverse of exportCurrentDataToSheet(): replaces whatever is currently
+// loaded here with what's actually in the sheet right now, then saves that
+// down through whatever this device's normal storage mode already is
+// (browser/file/sheets) via doPersist() — so a device that's fallen behind
+// (e.g. edits were pushed from the other device) can catch up in one tap,
+// without switching storage modes.
+async function pullLatestFromSheet(spreadsheetId) {
+  gsSpreadsheetId = spreadsheetId;
+  await gsReadAll();
+  await doPersist();
+  saveLastExportSheetId(spreadsheetId);
+  renderAll();
   return spreadsheetId;
 }
 
@@ -1879,9 +1903,11 @@ function renderPushSheetPanel() {
           <button id="psCreateSheetBtn">Create sheet &amp; push</button>
         </div>
         <div class="addPointerRow" style="margin-top:8px;">
-          <input type="text" id="psExistingSheetInput" placeholder="Paste a Google Sheet link or ID" value="${escapeHtml(gsSpreadsheetId || '')}">
+          <input type="text" id="psExistingSheetInput" placeholder="Paste a Google Sheet link or ID" value="${escapeHtml(gsSpreadsheetId || loadLastExportSheetId())}">
           <button id="psPushExistingBtn">Push to this sheet</button>
-        </div>`;
+          <button id="psPullExistingBtn" class="btnGhost" type="button">Pull latest instead</button>
+        </div>
+        <p class="footerNote" style="margin-top:6px;">"Push" overwrites the sheet with what's loaded here. "Pull" does the opposite — replaces what's loaded here with whatever's currently in the sheet (use this on whichever device is behind, e.g. after pushing from your other device).</p>`;
       if (apiKey) {
         html += `<div style="margin-top:8px;"><button class="headerBtn" id="psPickBtn">Pick from Drive…</button></div>`;
       }
@@ -1950,6 +1976,21 @@ function wirePushSheetPanelHandlers() {
       console.error(e);
       showErr('Could not push to that sheet: ' + e.message);
       byId('psPushExistingBtn').textContent = 'Push to this sheet';
+    }
+  });
+  if (byId('psPullExistingBtn')) byId('psPullExistingBtn').addEventListener('click', async () => {
+    const raw = byId('psExistingSheetInput').value.trim();
+    if (!raw) return;
+    const id = extractSheetId(raw);
+    byId('psPullExistingBtn').textContent = 'Pulling…';
+    try {
+      await pullLatestFromSheet(id);
+      showToast('Pulled the latest data from the sheet ✓');
+      renderPushSheetPanel();
+    } catch (e) {
+      console.error(e);
+      showErr('Could not pull from that sheet: ' + e.message);
+      byId('psPullExistingBtn').textContent = 'Pull latest instead';
     }
   });
   if (byId('psPickBtn')) byId('psPickBtn').addEventListener('click', async () => {
@@ -4098,6 +4139,7 @@ window.__TP_TEST__ = {
   reorderJob, buildCardTree, applyKanbanColumnDrop,
   parseFilterExpression, renderListBody, renderCardView, renderKanban,
   accessibleTextColorFor, renderCategoriesTable, renderKanbanFilterBar,
+  exportCurrentDataToSheet, pullLatestFromSheet, loadLastExportSheetId,
   setAdvancedFilter(f) { advancedFilter = f; renderListBody(); },
   setListSort(levels) { listSort = levels; syncSortToolbar(); renderList(); },
   setKanbanFilters(f) { kanbanFilters = f; renderKanban(); },
