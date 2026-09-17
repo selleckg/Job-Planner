@@ -555,6 +555,14 @@
           <option>Completed</option><option>Cancelled</option>
         </select>
       </div>
+      <div class="field"><label>At-Bat / On-Deck</label>
+        <select id="f-worklane">
+          <option value="">— none —</option>
+          <option value="atbat">At-Bat</option>
+          <option value="ondeck">On-Deck</option>
+        </select>
+        <span class="footerNote" id="f-worklaneHint" style="display:none;">Only available while Status is Parking Lot or In-Progress.</span>
+      </div>
       <div class="field"><label>Category <button class="headerBtn" id="btnManageCatsInline" style="padding:3px 8px;font-size:.7rem;" type="button">manage…</button></label><select id="f-category"></select></div>
 
       <div class="field"><label>Size</label>
@@ -3516,6 +3524,21 @@ function updateScoreDisplay() {
   document.getElementById('f-score').value = score === null ? '' : String(score);
 }
 
+// At-Bat/On-Deck (work_lane) only ever makes sense on a Parking Lot/
+// In-Progress job (see OVERDUE_ELIGIBLE) — mirrors that rule live in the
+// Edit modal so mobile users (who can't reliably drag onto the Kanban
+// lane columns) have an explicit, reliable way to set it, matching what
+// dragging a card onto At-Bat/On-Deck already does on desktop.
+function updateWorkLaneFieldEnabled() {
+  const status = document.getElementById('f-status').value;
+  const sel = document.getElementById('f-worklane');
+  const hint = document.getElementById('f-worklaneHint');
+  const eligible = OVERDUE_ELIGIBLE.has(status);
+  sel.disabled = !eligible;
+  hint.style.display = eligible ? 'none' : 'block';
+  if (!eligible) sel.value = '';
+}
+
 function openEditModal(jobId, prefill) {
   editingJobId = jobId;
   document.getElementById('editError').style.display = 'none';
@@ -3534,6 +3557,8 @@ function openEditModal(jobId, prefill) {
   document.getElementById('f-id').value = job.id;
   document.getElementById('f-name').value = job.name || '';
   document.getElementById('f-status').value = job.status || 'Parking Lot';
+  document.getElementById('f-worklane').value = job.work_lane || '';
+  updateWorkLaneFieldEnabled();
   populateCategorySelect(job.category || '');
   populateSizeSelect(job.size || '');
   document.getElementById('f-priority').value = job.priority || '';
@@ -3634,11 +3659,11 @@ function saveEditModal() {
     seq: isNew ? window.__pendingNewJob.seq : getJob(id).seq,
     priority: document.getElementById('f-priority').value || null,
     urgency: document.getElementById('f-urgency').value || null,
-    // work_lane (At-Bat/On-Deck) has no field in this modal — carry the
-    // existing value forward, but drop it if the saved status is no longer
-    // lane-eligible (round 8: a lane assignment only ever makes sense on an
-    // Parking Lot/In-Progress job).
-    work_lane: (!isNew && getJob(id).work_lane && OVERDUE_ELIGIBLE.has(newStatus)) ? getJob(id).work_lane : null
+    // At-Bat/On-Deck, read straight from the modal's own field now — but
+    // still enforce the rule defensively (belt-and-suspenders alongside
+    // updateWorkLaneFieldEnabled(), which already disables/clears the field
+    // in the UI once status isn't Parking Lot/In-Progress).
+    work_lane: OVERDUE_ELIGIBLE.has(newStatus) ? (document.getElementById('f-worklane').value || null) : null
   };
   if (isNew) insertJob(job); else updateJob(job);
   persist();
@@ -4070,6 +4095,7 @@ function wireAppUI() {
   });
   document.getElementById('f-priority').addEventListener('change', updateScoreDisplay);
   document.getElementById('f-urgency').addEventListener('change', updateScoreDisplay);
+  document.getElementById('f-status').addEventListener('change', updateWorkLaneFieldEnabled);
   document.getElementById('f-name').addEventListener('focus', (e) => {
     if (e.target.value === 'New Job') e.target.value = '';
   });
