@@ -1507,12 +1507,30 @@ function extractSheetId(input) {
   return m ? m[1] : input;
 }
 
+const SHEETS_CATEGORY_COLS = ['name', 'color'];
+
 async function gsCreateSpreadsheet(title) {
   const json = await gsFetch('', {
     method: 'POST',
-    body: JSON.stringify({ properties: { title }, sheets: [{ properties: { title: 'Jobs' } }, { properties: { title: 'Deps' } }] })
+    body: JSON.stringify({ properties: { title }, sheets: [{ properties: { title: 'Jobs' } }, { properties: { title: 'Deps' } }, { properties: { title: 'Categories' } }] })
   });
   return json.spreadsheetId;
+}
+
+// Adds any of the given tabs that don't already exist on the connected
+// spreadsheet. Needed so a sheet created before the Categories tab existed
+// (or before Sheets sync existed at all) doesn't error out the next time we
+// try to read or write it — it just gets the missing tab added on the fly.
+async function ensureSheetTabsExist(titles) {
+  const meta = await gsFetch(gsSpreadsheetId);
+  const existing = new Set((meta.sheets || []).map(s => s.properties.title));
+  const missing = titles.filter(t => !existing.has(t));
+  if (missing.length) {
+    await gsFetch(gsSpreadsheetId + ':batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ requests: missing.map(title => ({ addSheet: { properties: { title } } })) })
+    });
+  }
 }
 
 async function gsWriteAll() {
@@ -1520,22 +1538,47 @@ async function gsWriteAll() {
   const jobRows = [SHEETS_JOB_COLS].concat(jobs.map(j => SHEETS_JOB_COLS.map(c => j[c] === null || j[c] === undefined ? '' : j[c])));
   const depsRes = db.exec("SELECT job_id, depends_on_id FROM deps");
   const depRows = [['job_id', 'depends_on_id']].concat(depsRes.length ? depsRes[0].values : []);
-  // Clear first so a shrinking job list doesn't leave stale trailing rows.
+  const categories = getCategories();
+  const catRows = [SHEETS_CATEGORY_COLS].concat(categories.map(c => SHEETS_CATEGORY_COLS.map(col => c[col] === null || c[col] === undefined ? '' : c[col])));
+
+  await ensureSheetTabsExist(['Jobs', 'Deps', 'Categories']);
+
+  // Clear first so a shrinking job/category list doesn't leave stale trailing rows.
   await gsFetch(gsSpreadsheetId + '/values:batchClear', {
-    method: 'POST', body: JSON.stringify({ ranges: ['Jobs!A:Z', 'Deps!A:Z'] })
+    method: 'POST', body: JSON.stringify({ ranges: ['Jobs!A:Z', 'Deps!A:Z', 'Categories!A:Z'] })
   });
   await gsFetch(gsSpreadsheetId + '/values:batchUpdate', {
     method: 'POST',
-    body: JSON.stringify({ valueInputOption: 'RAW', data: [{ range: 'Jobs!A1', values: jobRows }, { range: 'Deps!A1', values: depRows }] })
+    body: JSON.stringify({ valueInputOption: 'RAW', data: [
+      { range: 'Jobs!A1', values: jobRows },
+      { range: 'Deps!A1', values: depRows },
+      { range: 'Categories!A1', values: catRows }
+    ] })
   });
 }
 
 async function gsReadAll() {
-  const json = await gsFetch(gsSpreadsheetId + '/values:batchGet?ranges=Jobs!A:Z&ranges=Deps!A:Z');
-  const [jobsRange, depsRange] = json.valueRanges;
+  // Older sheets (created before Categories sync existed) won't have that
+  // tab yet — add it (empty) before reading, so the batchGet below doesn't
+  // fail by referencing a sheet name that doesn't exist.
+  await ensureSheetTabsExist(['Jobs', 'Deps', 'Categories']);
+  const json = await gsFetch(gsSpreadsheetId + '/values:batchGet?ranges=Jobs!A:Z&ranges=Deps!A:Z&ranges=Categories!A:Z');
+  const [jobsRange, depsRange, catsRange] = json.valueRanges;
   const jobRows = jobsRange.values || [];
   const depRows = depsRange.values || [];
+  const catRows = catsRange.values || [];
   newDatabase();
+  if (catRows.length > 1) {
+    const header = catRows[0];
+    const nameIdx = header.indexOf('name');
+    const colorIdx = header.indexOf('color');
+    for (let r = 1; r < catRows.length; r++) {
+      const row = catRows[r];
+      const name = nameIdx >= 0 ? row[nameIdx] : row[0];
+      const color = colorIdx >= 0 ? row[colorIdx] : row[1];
+      if (name) addCategory(name, color || '');
+    }
+  }
   if (jobRows.length > 1) {
     const header = jobRows[0];
     const numericCols = new Set(['est_work','act_work','est_cost','act_cost','seq']);
